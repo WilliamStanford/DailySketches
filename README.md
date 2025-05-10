@@ -1,1 +1,3 @@
-Generating sketches in processing.js and graphics shaders
+Generating sketches in processing.js and graphics shaders.
+
+Sketches are organized by day
