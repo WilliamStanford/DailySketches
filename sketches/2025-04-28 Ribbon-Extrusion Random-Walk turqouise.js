@@ -1,92 +1,108 @@
 /**
- * p5.js – Ribbon-Extrusion Random-Walk with travelling pulse
+ * p5.js – Ribbon‑Extrusion Random‑Walk (perspective version)
  * ----------------------------------------------------------
- * – Builds a chain of touching circles that starts on a canvas edge
- * – Stops once ≥ 30 circles & the last one crosses the canvas boundary
- * – Converts contacts into outline-arc segments
- * – Renders as an opaque 3-D ribbon:
- *       black body  +  white outline (fading with depth)
- * – One slice at a time lights up turquoise (α = 255) and marches “backward”
+ * • Builds a chain of touching circles:
+ *      – first circle sits half‑inside the frame
+ *      – DFS/back‑tracking until ≥ 5 circles are wholly outside the canvas
+ * • Recentres + rescales once so every visible arc fits a 1080×1080 viewport
+ * • Renders the ribbon as a one‑point‑perspective “slice stack”
+ *      – black body + white fading outline
+ *      – travelling turquoise pulse
  */
 
-// ───────────────────────────────────────────── Globals & parameters ──────────
+let circles = [];        // circle chain
+let arcs    = [];        // outline segments
 
-let circles = [];           // chain of circle objects
-let arcs    = [];           // outline segments extracted from the chain
+/* ───── globals & parameters ────────────────────────────────────────────── */
+const FPS         = 60;
 
-const FPS = 60;   
-let grabbedYet   = false;
+const CANVAS_W    = 1080;      // actual p5 canvas
+const CANVAS_H    = 1080;
 
-const CANVAS_W  = 1080;
-const CANVAS_H  = 1080; 
-  
-const MIN_R     = 50;
-const MAX_R     = 200; 
+const VIEWPORT    = 1080;      // promised no‑clip zone
+const VIEW_PAD    = 20;        // margin inside viewport
 
-const LAYERS    = 220;        // depth slices
-const STEP_X    = -1;         // per-slice drift
-const STEP_Y    =  1;
+const MIN_R       = 50;
+const MAX_R       = 200;
 
-const WHITE_W   = 2;          // highlight stroke weight
-const BLACK_W   = 3;          // ribbon body – must exceed slice gap
+const LAYERS      = 220;       // depth slices
+const DEPTH_SCALE = 0.99;      // shrink factor per slice
 
-const TICK      = 1;        // frames each slice stays lit (speed of pulse)
-  
-// ──────────────────────────────────────────────────────────── p5 setup ──────
+const BLACK_W     = 2;         // ribbon body stroke
+const WHITE_W     = 1;         // outline stroke
+
+const GAP         = 6;         // layers between turquoise pulses
+const TICK        = 1;         // frames each slice stays lit
+
+const MAX_ANGLES_TRIED = 64;    // from 18  →  denser fan‑out
+const failsSinceOutsideLimit = 16; // from 3   →  deeper exploration
+
+
+/* ───── p5: setup ───────────────────────────────────────────────────────── */
 function setup () {
   frameRate(FPS);
   createCanvas(CANVAS_W, CANVAS_H);
-  generateTouchingCircles();
-  buildArcList();
+
+  generateTouchingCircles();   // DFS w/ back‑tracking
+  fitRibbonToViewport();       // centre + scale into 1080×1080
+  fillVoids();
+  buildArcList();              // extract arc segments
 }
 
-// ───────────────────────────────────────────────────────────── main draw ────
+/* ───── p5: draw ────────────────────────────────────────────────────────── */
 function draw () {
   background(0);
   noFill();
 
-  // which layer is “lit” this frame?
-  const activeLayer = (floor(frameCount / TICK) % LAYERS);   // 0 = nearest
+  const leader = floor(frameCount / TICK) % LAYERS;
+  const pulses = floor(leader / GAP) + 1;
 
-  // paint far→near so nearer slices cover the far ones
   for (let layer = LAYERS - 1; layer >= 0; layer--) {
     push();
-    translate(layer * STEP_X, layer * STEP_Y);
 
-    /* 1) opaque black body */
+    /* one‑point perspective transform */
+    translate(width / 2, height / 2);
+    const s = Math.pow(DEPTH_SCALE, layer);
+    scale(s);
+
+    /* keep strokes visually constant */
+    const bodyW    = BLACK_W  / s;
+    const outlineW = WHITE_W  / s;
+
+    /* opaque ribbon body */
     stroke(0);
-    strokeWeight(BLACK_W);
+    strokeWeight(bodyW);
     for (const seg of arcs) drawArcSegment(seg);
 
-    /* 2) highlight */
-    if (layer === activeLayer) {
-      // turquoise pulse – fully opaque
+    /* turquoise pulse logic */
+    const diff      = leader - layer;
+    const turquoise = diff >= 0 && diff % GAP === 0 && diff / GAP < pulses;
+
+    strokeWeight(outlineW);
+    if (turquoise) {
       stroke(0, 255, 255, 255);
     } else {
-      // normal white fade with depth
-      const alpha = lerp(255, 0, layer / (LAYERS - 1))- 25;
+      const alpha = lerp(255, 0, layer / (LAYERS - 1)) - 25;
       stroke(255, alpha);
     }
-    strokeWeight(WHITE_W);
     for (const seg of arcs) drawArcSegment(seg);
 
     pop();
   }
-  if (window.recPending) saveGifFrame();   // from capture.js
+
+  if (window.recPending) saveGifFrame();   // optional capture.js hook
 }
 
-// ───────────────────────────────────────── outline-arc construction ─────────
+/* ───── outline‑arc construction ───────────────────────────────────────── */
 function buildArcList () {
   arcs.length = 0;
   if (circles.length < 2) return;
 
-  // edge → circle-1 contact
   const c0 = circles[0], c1 = circles[1];
   const edgeAngle = [ -HALF_PI, 0, HALF_PI, PI ][c0.edge];
   const toSecond  = atan2(c1.y - c0.y, c1.x - c0.x);
   arcs.push({cx:c0.x, cy:c0.y, r:c0.radius, a1:edgeAngle, a2:toSecond, cw:true});
 
-  // chain contacts
   for (let i = 1; i < circles.length - 1; i++) {
     const prev = circles[i-1], cur = circles[i], nxt = circles[i+1];
     const a1 = atan2(cur.y - prev.y, cur.x - prev.x) + PI;
@@ -95,87 +111,149 @@ function buildArcList () {
   }
 }
 
-// ─────────────────────────────── utility: draw a single arc segment ─────────
+/* ───── arc renderer (shift to eye‑point) ───────────────────────────────── */
 function drawArcSegment ({cx, cy, r, a1, a2, cw}) {
-  // wrap angles to 0..TWO_PI
+  cx -= width  / 2;
+  cy -= height / 2;
+
   a1 = (a1 % TWO_PI + TWO_PI) % TWO_PI;
   a2 = (a2 % TWO_PI + TWO_PI) % TWO_PI;
 
-  if (cw) {           // clockwise (p5 default)
-    if (a2 <= a1) a2 += TWO_PI;
-    arc(cx, cy, r*2, r*2, a1, a2);
-  } else {            // counter-clockwise
-    if (a1 <= a2) a1 += TWO_PI;
-    arc(cx, cy, r*2, r*2, a2, a1);
-  }
+  if (cw) { if (a2 <= a1) a2 += TWO_PI; arc(cx, cy, r*2, r*2, a1, a2); }
+  else    { if (a1 <= a2) a1 += TWO_PI; arc(cx, cy, r*2, r*2, a2, a1); }
 }
 
-// ──────────────────────────────── circle-chain generator (unchanged) ────────
-function generateTouchingCircles () {
+/* ───── DFS circle‑chain generator with back‑tracking ───────────────────── */
+function fullyOutside (c) {
+  return (
+    c.x + c.radius < 0            ||
+    c.x - c.radius > CANVAS_W     ||
+    c.y + c.radius < 0            ||
+    c.y - c.radius > CANVAS_H
+  );
+}
+
+function overlapsAny (nc) {
+  return circles.some(
+    c => dist(c.x, c.y, nc.x, nc.y) < c.radius + nc.radius - 0.1   // −ε
+  );
+}
+
+function generateTouchingCircles() {
   circles.length = 0;
 
-  const edge = floor(random(4));
+  /* 1 — seed: half‑inside on a random edge */
+  const edge = floor(random(4));          // 0=top 1=right 2=bottom 3=left
   const r0   = random(MIN_R, MAX_R);
-  const x0   = (edge === 1) ? width  - r0 :
-               (edge === 3) ? r0 :
-               random(r0, width  - r0);
-  const y0   = (edge === 0) ? r0 :
-               (edge === 2) ? height - r0 :
-               random(r0, height - r0);
-  circles.push({x:x0, y:y0, radius:r0, edge});
 
-  const MAX_ATTEMPTS = 8000, MAX_CIRCLES = 150;
-  let attempts = 0;
+  const x0 = (edge === 1) ? CANVAS_W - r0 * 0.5 :
+             (edge === 3) ? r0 * 0.5             :
+             random(r0 * 0.5, CANVAS_W - r0 * 0.5);
+  const y0 = (edge === 0) ? r0 * 0.5             :
+             (edge === 2) ? CANVAS_H - r0 * 0.5   :
+             random(r0 * 0.5, CANVAS_H - r0 * 0.5);
 
-  while (++attempts < MAX_ATTEMPTS && circles.length < MAX_CIRCLES) {
-    const last = circles[circles.length - 1];
-    const newR = random(MIN_R, MAX_R);
+  circles.push({ x: x0, y: y0, radius: r0, edge });
 
-    const ang  = (circles.length < 30) ? safeAngle(last) : random(TWO_PI);
-    const dist = last.radius + newR;
-    const nx   = last.x + cos(ang) * dist;
-    const ny   = last.y + sin(ang) * dist;
-    const next = {x:nx, y:ny, radius:newR};
+  /* 2 — DFS parameters */
+  const MAX_CIRCLES      = 300;    // absolute hard cap
+  const MAX_TOTAL_TRIES  = 40000;  // safety valve
+  const ANGLE_STEP       = TWO_PI / 64;   // 5.625°
+  const TARGET_OUTSIDE   = 5;
 
-    if (overlapsAny(next)) continue;
-    circles.push(next);
-    if (circles.length >= 30 && isOutside(next)) break;
+  let totalTries   = 0;
+  let outsideCount = fullyOutside(circles[0]) ? 1 : 0;
+
+  /* keep track of the best‑ever chain */
+  let bestCircles   = circles.map(c => ({ ...c }));
+  let bestOutsideCt = outsideCount;
+
+  /* 3 — depth‑first search with back‑tracking */
+  function dfs () {
+    if (++totalTries > MAX_TOTAL_TRIES) return;
+
+    /* record best chain so far */
+    if (outsideCount >= TARGET_OUTSIDE && circles.length > bestCircles.length) {
+      bestCircles   = circles.map(c => ({ ...c }));
+      bestOutsideCt = outsideCount;
+    }
+
+    /* stop if we hit the absolute cap */
+    if (circles.length >= MAX_CIRCLES) return;
+
+    const last  = circles[circles.length - 1];
+    const dist0 = last.radius;
+
+    /* fan out around the tail in small angular increments */
+    for (let ang = 0; ang < TWO_PI; ang += ANGLE_STEP) {
+      const newR = random(MIN_R, MAX_R);
+      const nx   = last.x + cos(ang) * (dist0 + newR);
+      const ny   = last.y + sin(ang) * (dist0 + newR);
+      const next = { x: nx, y: ny, radius: newR };
+
+      if (overlapsAny(next)) continue;
+
+      circles.push(next);
+      if (fullyOutside(next)) outsideCount++;
+
+      dfs();                             // recurse deeper
+
+      /* back‑track */
+      if (fullyOutside(next)) outsideCount--;
+      circles.pop();
+    }
+  }
+
+  dfs();                                 // launch the exhaustive search
+
+  /* 4 — restore the longest chain found */
+  circles.length = 0;
+  for (const c of bestCircles) circles.push(c);
+}
+
+/* ───── centre + scale chain into 1080×1080 viewport ───────────────────── */
+function fitRibbonToViewport () {
+  let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
+  for (const c of circles) {
+    minX = min(minX, c.x - c.radius);
+    maxX = max(maxX, c.x + c.radius);
+    minY = min(minY, c.y - c.radius);
+    maxY = max(maxY, c.y + c.radius);
+  }
+  const bw = maxX - minX;
+  const bh = maxY - minY;
+  const limit = VIEWPORT - VIEW_PAD * 2;
+  const scale = min(1, min(limit / bw, limit / bh));
+
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+
+  for (const c of circles) {
+    c.x = (c.x - cx) * scale + CANVAS_W * 0.5;
+    c.y = (c.y - cy) * scale + CANVAS_H * 0.5;
+    c.radius *= scale;
   }
 }
 
-/* pick an angle that tries to keep the next circle inside */
-function safeAngle (c) {
-  let minA = 0, maxA = TWO_PI;
-  if (c.x - c.radius <= 0)          { minA = -HALF_PI; maxA =  HALF_PI; }
-  else if (c.x + c.radius >= width) { minA =  HALF_PI; maxA =  PI+HALF_PI; }
-  if (c.y - c.radius <= 0)          { minA = max(minA, 0);   maxA = min(maxA, PI); }
-  else if (c.y + c.radius >= height){ minA = max(minA, PI);  maxA = min(maxA, TWO_PI); }
-  return random(minA, maxA);
+function fillVoids (attempts = 2000) {
+  while (attempts--) {
+    const r   = random(12, 30);
+    const nx  = random(CANVAS_W), ny = random(CANVAS_H);
+    const c   = {x:nx, y:ny, radius:r};
+
+    if (overlapsAny(c)) continue;
+    if (!fullyInsideViewport(c)) continue;   // helper that checks 1080 box
+
+    circles.push(c);               // a filler circle – no need to be outside
+  }
 }
 
-/* helpers */
-function overlapsAny (nc) {
-  return circles.some(c => dist(c.x, c.y, nc.x, nc.y) < c.radius + nc.radius);
-}
-function isOutside (c) {
-  return (c.x - c.radius < 0 || c.x + c.radius > width ||
-          c.y - c.radius < 0 || c.y + c.radius > height);
-}
-
-// ───────────────────────────── save on “s” key (lossless PNG) ───────────────
-// ───────────────────────────── save / record keys ────────────
+/* ───── save / record keys (optional) ──────────────────────────────────── */
 function keyPressed () {
-
-  /* NEW – press R to record a 10-s PNG sequence into one .zip */
-  if((key === 'R') && !window.recPending) {
-    startCapture();                         // function from capture.js
-  }
-
-  /* your old one-shot image (Z) still works */
+  if (key === 'R' && !window.recPending) startCapture();
   if (key === 'Z') {
     const d  = new Date();
     const ts = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     saveCanvas(`${ts}`, 'jpg', 1.0);
   }
 }
-  
