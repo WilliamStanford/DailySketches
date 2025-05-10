@@ -1,1 +1,1 @@
-Generating sketches in processing.js - inspo from many currently working through processes by Zach Lieberman
+Generating sketches in processing.js and graphics shaders
